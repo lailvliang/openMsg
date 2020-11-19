@@ -667,7 +667,7 @@ public class DLedgerEntryPusher {
         }
 
         private void doCompare() throws Exception {
-            while (true) {
+            while (true) { //测试
                 if (!checkAndFreshState()) {  //检查状态
                     break;
                 }
