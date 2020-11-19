@@ -43,6 +43,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiConsumer;
+
 import org.apache.rocketmq.remoting.netty.NettyClientConfig;
 import org.apache.rocketmq.remoting.netty.NettyRemotingClient;
 import org.apache.rocketmq.remoting.netty.NettyRemotingServer;
@@ -329,8 +331,11 @@ public class DLedgerRpcNettyService extends DLedgerRpcService {
             case APPEND: {
                 AppendEntryRequest appendEntryRequest = JSON.parseObject(request.getBody(), AppendEntryRequest.class);
                 CompletableFuture<AppendEntryResponse> future = handleAppend(appendEntryRequest);
-                future.whenCompleteAsync((x, y) -> {
-                    writeResponse(x, y, request, ctx);
+                future.whenCompleteAsync(new BiConsumer<AppendEntryResponse, Throwable>() {
+                    @Override
+                    public void accept(AppendEntryResponse x, Throwable y) {
+                        DLedgerRpcNettyService.this.writeResponse(x, y, request, ctx);
+                    }
                 }, futureExecutor);
                 break;
             }

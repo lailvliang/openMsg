@@ -20,6 +20,7 @@ import java.nio.ByteBuffer;
 
 public class DLedgerEntryCoder {
 
+    //将 DLedgerEntry，即将数据写入到 ByteBuffer中，从这里看出，每一次写入会调用 ByteBuffer 的 clear 方法，将数据清空，从这里可以看出，每一次数据追加，只能存储4M的数据。
     public static void encode(DLedgerEntry entry, ByteBuffer byteBuffer) {
         byteBuffer.clear();
         int size = entry.computSizeInBytes();

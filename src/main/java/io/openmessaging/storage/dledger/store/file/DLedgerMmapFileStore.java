@@ -46,25 +46,25 @@ public class DLedgerMmapFileStore extends DLedgerStore {
 
     private static Logger logger = LoggerFactory.getLogger(DLedgerMmapFileStore.class);
     public List<AppendHook> appendHooks = new ArrayList<>();
-    private long ledgerBeginIndex = -1;
-    private long ledgerEndIndex = -1;
-    private long committedIndex = -1;
+    private long ledgerBeginIndex = -1; //日志的起始索引，默认为 -1。
+    private long ledgerEndIndex = -1;   //下一条日志下标，默认为 -1。
+    private long committedIndex = -1;   //已提交的日志索引。
     private long committedPos = -1;
-    private long ledgerEndTerm;
-    private DLedgerConfig dLedgerConfig;
-    private MemberState memberState;
-    private MmapFileList dataFileList;
-    private MmapFileList indexFileList;
-    private ThreadLocal<ByteBuffer> localEntryBuffer;
-    private ThreadLocal<ByteBuffer> localIndexBuffer;
-    private FlushDataService flushDataService;
-    private CleanSpaceService cleanSpaceService;
-    private boolean isDiskFull = false;
+    private long ledgerEndTerm;  //当前最大的投票轮次。
+    private DLedgerConfig dLedgerConfig;  //DLedger 的配置信息。
+    private MemberState memberState;  //状态机。
+    private MmapFileList dataFileList;  //日志文件(数据文件)的内存映射Queue。
+    private MmapFileList indexFileList;  //索引文件的内存映射文件集合。（可对标 RocketMQ MappedFIleQueue )。
+    private ThreadLocal<ByteBuffer> localEntryBuffer;   //本地线程变量，用来缓存索引ByteBuffer。
+    private ThreadLocal<ByteBuffer> localIndexBuffer;   //本地线程变量，用来缓存数据索引ByteBuffer。
+    private FlushDataService flushDataService;   //数据文件刷盘线程。
+    private CleanSpaceService cleanSpaceService;    //清除过期日志文件线程
+    private boolean isDiskFull = false;  //磁盘是否已满
 
-    private long lastCheckPointTimeMs = System.currentTimeMillis();
+    private long lastCheckPointTimeMs = System.currentTimeMillis();  //上一次检测点（时间戳）
 
-    private AtomicBoolean hasLoaded = new AtomicBoolean(false);
-    private AtomicBoolean hasRecovered = new AtomicBoolean(false);
+    private AtomicBoolean hasLoaded = new AtomicBoolean(false);  //是否已经加载，主要用来避免重复加载(初始化)日志文件。
+    private AtomicBoolean hasRecovered = new AtomicBoolean(false);  //是否已恢复
 
     public DLedgerMmapFileStore(DLedgerConfig dLedgerConfig, MemberState memberState) {
         this.dLedgerConfig = dLedgerConfig;
@@ -321,36 +321,47 @@ public class DLedgerMmapFileStore extends DLedgerStore {
 
     @Override
     public DLedgerEntry appendAsLeader(DLedgerEntry entry) {
+        //当前节点的状态是否是 Leader，如果不是，则抛出异常。
+        //当前磁盘是否已满，其判断依据是 DLedger 的根目录或数据文件目录的使用率超过了允许使用的最大值，默认值为85%
         PreConditions.check(memberState.isLeader(), DLedgerResponseCode.NOT_LEADER);
         PreConditions.check(!isDiskFull, DLedgerResponseCode.DISK_FULL);
+        //从本地线程变量获取一个数据与索引 buffer。其中用于存储数据的 ByteBuffer，其容量固定为 4M ，索引的 ByteBuffer 为两个索引条目的长度，固定为64个字节
         ByteBuffer dataBuffer = localEntryBuffer.get();
         ByteBuffer indexBuffer = localIndexBuffer.get();
+        //将 DLedgerEntry，即将数据写入到 ByteBuffer中，从这里看出，每一次写入会调用 ByteBuffer 的 clear 方法，将数据清空，从这里可以看出，每一次数据追加，只能存储4M的数据。
         DLedgerEntryCoder.encode(entry, dataBuffer);
         int entrySize = dataBuffer.remaining();
+        //锁定状态机，并再一次检测节点的状态是否是 Leader 节点
         synchronized (memberState) {
             PreConditions.check(memberState.isLeader(), DLedgerResponseCode.NOT_LEADER, null);
             PreConditions.check(memberState.getTransferee() == null, DLedgerResponseCode.LEADER_TRANSFERRING, null);
+            //为当前日志条目设置序号，即 entryIndex 与 entryTerm (投票轮次)。并将魔数、entryIndex、entryTerm 等写入到 bytebuffer 中。
             long nextIndex = ledgerEndIndex + 1;
             entry.setIndex(nextIndex);
             entry.setTerm(memberState.currTerm());
             entry.setMagic(CURRENT_MAGIC);
             DLedgerEntryCoder.setIndexTerm(dataBuffer, nextIndex, memberState.currTerm(), CURRENT_MAGIC);
+            //计算新的消息的起始偏移量，关于 dataFileList 的 preAppend 后续详细介绍其实现，然后将该偏移量写入日志的 bytebuffer 中。
             long prePos = dataFileList.preAppend(dataBuffer.remaining());
             entry.setPos(prePos);
             PreConditions.check(prePos != -1, DLedgerResponseCode.DISK_ERROR, null);
             DLedgerEntryCoder.setPos(dataBuffer, prePos);
+            //执行钩子函数。
             for (AppendHook writeHook : appendHooks) {
                 writeHook.doHook(entry, dataBuffer.slice(), DLedgerEntry.BODY_OFFSET);
             }
+            //将数据追加到 pagecache 中
             long dataPos = dataFileList.append(dataBuffer.array(), 0, dataBuffer.remaining());
             PreConditions.check(dataPos != -1, DLedgerResponseCode.DISK_ERROR, null);
             PreConditions.check(dataPos == prePos, DLedgerResponseCode.DISK_ERROR, null);
+            //构建条目索引并将索引数据追加到 pagecache。
             DLedgerEntryCoder.encodeIndex(dataPos, entrySize, CURRENT_MAGIC, nextIndex, memberState.currTerm(), indexBuffer);
             long indexPos = indexFileList.append(indexBuffer.array(), 0, indexBuffer.remaining(), false);
             PreConditions.check(indexPos == entry.getIndex() * INDEX_UNIT_SIZE, DLedgerResponseCode.DISK_ERROR, null);
             if (logger.isDebugEnabled()) {
                 logger.info("[{}] Append as Leader {} {}", memberState.getSelfId(), entry.getIndex(), entry.getBody().length);
             }
+            //ledgerEndeIndex 加一（下一个条目）的序号。并设置 leader 节点的状态机的 ledgerEndIndex 与 ledgerEndTerm
             ledgerEndIndex++;
             ledgerEndTerm = memberState.currTerm();
             if (ledgerBeginIndex == -1) {
@@ -536,27 +547,28 @@ public class DLedgerMmapFileStore extends DLedgerStore {
         return committedIndex;
     }
 
-    public void updateCommittedIndex(long term, long newCommittedIndex) {
+    public void updateCommittedIndex(long term, long newCommittedIndex) { //主节点当前的投票轮次。 需提交日志序号。
         if (newCommittedIndex == -1
             || ledgerEndIndex == -1
             || term < memberState.currTerm()
-            || newCommittedIndex == this.committedIndex) {
+            || newCommittedIndex == this.committedIndex) { //如果待更新提交序号为 -1 或 投票轮次小于从节点的投票轮次或主节点投票轮次等于从节点的已提交序号，则直接忽略本次提交动作。
             return;
         }
         if (newCommittedIndex < this.committedIndex
             || newCommittedIndex < this.ledgerBeginIndex) {
+            //如果需提交日志序号小于已提交日志序号 或 需提交序号小于当前节点的最小有效日志序号，则输出警告日志[MONITOR]，并忽略本次提交动作
             logger.warn("[MONITOR]Skip update committed index for new={} < old={} or new={} < beginIndex={}", newCommittedIndex, this.committedIndex, newCommittedIndex, this.ledgerBeginIndex);
             return;
         }
         long endIndex = ledgerEndIndex;
-        if (newCommittedIndex > endIndex) {
+        if (newCommittedIndex > endIndex) {    //如果从节点落后主节点太多，则重置 提交索引为从节点当前最大有效日志序号。
             //If the node fall behind too much, the committedIndex will be larger than enIndex.
             newCommittedIndex = endIndex;
         }
-        DLedgerEntry dLedgerEntry = get(newCommittedIndex);
+        DLedgerEntry dLedgerEntry = get(newCommittedIndex);    //尝试根据待提交序号从从节点查找数据，如果数据不存在，则抛出 DISK_ERROR 错误。
         PreConditions.check(dLedgerEntry != null, DLedgerResponseCode.DISK_ERROR);
         this.committedIndex = newCommittedIndex;
-        this.committedPos = dLedgerEntry.getPos() + dLedgerEntry.getSize();
+        this.committedPos = dLedgerEntry.getPos() + dLedgerEntry.getSize();  //更新 commitedIndex、committedPos 两个指针，DledgerStore会定时将已提交指针刷入 checkpoint 文件，达到持久化 commitedIndex 指针的目的
     }
 
     @Override

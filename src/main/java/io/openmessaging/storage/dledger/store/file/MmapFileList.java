@@ -190,8 +190,8 @@ public class MmapFileList {
         return preAppend(len, true);
     }
 
-    public long preAppend(int len, boolean useBlank) {
-        MmapFile mappedFile = getLastMappedFile();
+    public long preAppend(int len, boolean useBlank) { //需要申请的长度。 是否需要填充
+        MmapFile mappedFile = getLastMappedFile(); //获取最后一个文件，即获取当前正在写的文件
         if (null == mappedFile || mappedFile.isFull()) {
             mappedFile = getLastMappedFile(0);
         }
@@ -200,15 +200,16 @@ public class MmapFileList {
             return -1;
         }
         int blank = useBlank ? MIN_BLANK_LEN : 0;
-        if (len + blank > mappedFile.getFileSize() - mappedFile.getWrotePosition()) {
+        if (len + blank > mappedFile.getFileSize() - mappedFile.getWrotePosition()) {  //如果需要申请的资源超过了当前文件可写字节时
             if (blank < MIN_BLANK_LEN) {
                 logger.error("Blank {} should ge {}", blank, MIN_BLANK_LEN);
                 return -1;
             } else {
+                //申请一个当前文件剩余字节的大小的bytebuffer。
                 ByteBuffer byteBuffer = ByteBuffer.allocate(mappedFile.getFileSize() - mappedFile.getWrotePosition());
-                byteBuffer.putInt(BLANK_MAGIC_CODE);
-                byteBuffer.putInt(mappedFile.getFileSize() - mappedFile.getWrotePosition());
-                if (mappedFile.appendMessage(byteBuffer.array())) {
+                byteBuffer.putInt(BLANK_MAGIC_CODE); //写入魔数
+                byteBuffer.putInt(mappedFile.getFileSize() - mappedFile.getWrotePosition()); //写入字节长度，等于当前文件剩余的总大小
+                if (mappedFile.appendMessage(byteBuffer.array())) { //写入空字节 上面代码的用意就是写一条空Entry，填入魔数与 size，方便解析
                     //need to set the wrote position
                     mappedFile.setWrotePosition(mappedFile.getFileSize());
                 } else {
@@ -222,7 +223,7 @@ public class MmapFileList {
                 }
             }
         }
-        return mappedFile.getFileFromOffset() + mappedFile.getWrotePosition();
+        return mappedFile.getFileFromOffset() + mappedFile.getWrotePosition();  //如果当前文件足以容纳待写入的日志，则直接返回其物理偏移量
 
     }
 
@@ -231,7 +232,7 @@ public class MmapFileList {
             return -1;
         }
         MmapFile mappedFile = getLastMappedFile();
-        long currPosition = mappedFile.getFileFromOffset() + mappedFile.getWrotePosition();
+        long currPosition = mappedFile.getFileFromOffset() + mappedFile.getWrotePosition(); //获取data写入的位置  写入的位置会在preAppend处理
         if (!mappedFile.appendMessage(data, pos, len)) {
             logger.error("Append error for {}", storePath);
             return -1;

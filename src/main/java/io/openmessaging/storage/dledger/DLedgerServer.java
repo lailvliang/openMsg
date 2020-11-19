@@ -157,12 +157,17 @@ public class DLedgerServer implements DLedgerProtocolHander {
     @Override
     public CompletableFuture<AppendEntryResponse> handleAppend(AppendEntryRequest request) throws IOException {
         try {
+            //如果请求的节点ID不是当前处理节点，则抛出异常。
+            //如果请求的集群不是当前节点所在的集群，则抛出异常。
+            //如果当前节点不是主节点，则抛出异常。
             PreConditions.check(memberState.getSelfId().equals(request.getRemoteId()), DLedgerResponseCode.UNKNOWN_MEMBER, "%s != %s", request.getRemoteId(), memberState.getSelfId());
             PreConditions.check(memberState.getGroup().equals(request.getGroup()), DLedgerResponseCode.UNKNOWN_GROUP, "%s != %s", request.getGroup(), memberState.getGroup());
             PreConditions.check(memberState.isLeader(), DLedgerResponseCode.NOT_LEADER);
             PreConditions.check(memberState.getTransferee() == null, DLedgerResponseCode.LEADER_TRANSFERRING);
             long currTerm = memberState.currTerm();
             if (dLedgerEntryPusher.isPendingFull(currTerm)) {
+                //如果预处理队列已经满了，则拒绝客户端请求，返回 LEADER_PENDING_FULL 错误码；
+                //如果 dLedgerEntryPusher 的 push 队列已满，则返回追加一次，其错误码为 LEADER_PENDING_FULL
                 AppendEntryResponse appendEntryResponse = new AppendEntryResponse();
                 appendEntryResponse.setGroup(memberState.getGroup());
                 appendEntryResponse.setCode(DLedgerResponseCode.LEADER_PENDING_FULL.getCode());
@@ -170,6 +175,8 @@ public class DLedgerServer implements DLedgerProtocolHander {
                 appendEntryResponse.setLeaderId(memberState.getSelfId());
                 return AppendFuture.newCompletedFuture(-1, appendEntryResponse);
             } else {
+                // 如果未满，将请求封装成 DledgerEntry，则调用dLedgerStore 方法追加日志，并且通过使用dLedgerEntryPusher 的 waitAck 方法同步等待副本节点的复制响应，并最终将结果返回给调用方法
+                //追加消息到 Leader 服务器，并向从节点广播，在指定时间内如果未收到从节点的确认，则认为追加失败
                 if (request instanceof BatchAppendEntryRequest) {
                     BatchAppendEntryRequest batchRequest = (BatchAppendEntryRequest) request;
                     if (batchRequest.getBatchMsgs() != null && batchRequest.getBatchMsgs().size() != 0) {
@@ -197,7 +204,7 @@ public class DLedgerServer implements DLedgerProtocolHander {
                     DLedgerEntry dLedgerEntry = new DLedgerEntry();
                     dLedgerEntry.setBody(request.getBody());
                     DLedgerEntry resEntry = dLedgerStore.appendAsLeader(dLedgerEntry);
-                    return dLedgerEntryPusher.waitAck(resEntry, false);
+                    return dLedgerEntryPusher.waitAck(resEntry, false);  //等待一半的从节点提交成功
                 }
             }
         } catch (DLedgerException e) {

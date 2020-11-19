@@ -178,9 +178,9 @@ public class DefaultMmapFile extends ReferenceResource implements MmapFile {
      */
     @Override
     public boolean appendMessage(final byte[] data, final int offset, final int length) {
-        int currentPos = this.wrotePosition.get();
+        int currentPos = this.wrotePosition.get();  //获取当前写入的位置
 
-        if ((currentPos + length) <= this.fileSize) {
+        if ((currentPos + length) <= this.fileSize) {  //如果写入的位置+写入数据的长度 < 文件长度 则写入数据
             ByteBuffer byteBuffer = this.mappedByteBuffer.slice();
             byteBuffer.position(currentPos);
             byteBuffer.put(data, offset, length);
