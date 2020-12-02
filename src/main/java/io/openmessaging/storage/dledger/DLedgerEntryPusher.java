@@ -247,14 +247,12 @@ public class DLedgerEntryPusher {
                 Map<String, Long> peerWaterMarks = peerWaterMarksByTerm.get(currTerm);
                 //首先遍历 peerWaterMarks 的 value 集合，即上述示例中的 {100, 101}，用临时变量 index 来表示待投票的日志序号，
                 //需要集群内超过半数的节点的已复制序号超过该值，则该日志能被确认提交。
-                //遍历 peerWaterMarks 中的所有已提交序号，与当前值进行比较，如果节点的已提交序号大于等于待投票的日志序号(index)，num 加一，表示投赞成票。
-                //对 index 进行仲裁，如果超过半数 并且 index 大于 quorumIndex，更新 quorumIndex 的值为 index。quorumIndex 经过遍历的，得出当前最大的可提交日志序号。
-                //更新 committedIndex 索引，方便 DLedgerStore 定时将 committedIndex 写入 checkpoint 中。
+                //{100,101,101} 提交101、{99 100 101} 提交100 、{95 96 97 98 99 100 101} 提交98 因为集群有4个节点的序号都超过98了（超过一半） 但只有3个超过99（没到一半） 所以提交98
                 List<Long> sortedWaterMarks = peerWaterMarks.values()
                         .stream()
                         .sorted(Comparator.reverseOrder())
                         .collect(Collectors.toList());
-                long quorumIndex = sortedWaterMarks.get(sortedWaterMarks.size() / 2); //取中间数 中间数是
+                long quorumIndex = sortedWaterMarks.get(sortedWaterMarks.size() / 2); //排序后取中间数 中间数为此次提交日志序号
                 dLedgerStore.updateCommittedIndex(currTerm, quorumIndex);
                 //处理 quorumIndex 之前的挂起请求，需要发送响应到客户端,
                 ConcurrentMap<Long, TimeoutFuture<AppendEntryResponse>> responses = pendingAppendResponsesByTerm.get(currTerm);
